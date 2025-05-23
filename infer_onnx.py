@@ -1,19 +1,12 @@
 import os
-import torch
 import soundfile as sf
 from librosa import stft, istft
-import scipy
 import os
 import time
-import onnx
 import onnxruntime
-from onnxsim import simplify
 import numpy as np
 
 
-## load model
-onnx_model = onnx.load('crn.onnx')
-onnx.checker.check_model(onnx_model)
 ## load data
 in_name = 'test'
 mix, fs = sf.read(in_name + '.wav', dtype='float32')
@@ -32,7 +25,7 @@ print('cmpx:', acmpx.dtype, acmpx.shape)
 #[1, 257, 611, 2]
 inputs = np.transpose(acmpx, axes=(2, 0, 1, 3))
 print('inputs:', inputs.dtype, inputs.shape)
-session = onnxruntime.InferenceSession('crn.onnx', None, providers=['CPUExecutionProvider'])
+session = onnxruntime.InferenceSession('model/gtcrn.onnx', None, providers=['CPUExecutionProvider'])
 conv_cache = np.zeros([2, 1, 16, 16, 33],  dtype="float32")
 tra_cache = np.zeros([2, 3, 1, 1, 16],  dtype="float32")
 inter_cache = np.zeros([2, 1, 33, 16],  dtype="float32")
