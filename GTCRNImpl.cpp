@@ -1,44 +1,50 @@
 
 #include "GTCRNImpl.h"
+#include "pocketfft_hdronly.h"
+#include <complex>
+typedef std::complex<double> cpx_type;
 
-void GTCRNImpl::ExportWAV(
-        const std::string & Filename, 
-		const std::vector<float>& Data, 
-		unsigned SampleRate) {
-    AudioFile<float>::AudioBuffer Buffer;
-	Buffer.resize(1);
+#ifndef PI
+#define PI 3.14159265358979323846f
+#endif
 
-	Buffer[0] = Data;
-	size_t BufSz = Data.size();
+GTCRNImpl::GTCRNImpl(const char* ModelPath) {
+  // Init threads = 1
+  Ort::SessionOptions session_options;
+  session_options.SetIntraOpNumThreads(1);
+  session_options.SetInterOpNumThreads(1);
+  session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-	AudioFile<float> File;
-	File.setAudioBuffer(Buffer);
-	File.setAudioBufferSize(1, (int)BufSz);
-	File.setNumSamplesPerChannel((int)BufSz);
-	File.setNumChannels(1);
-	File.setBitDepth(16);
-	File.setSampleRate(SAMEPLERATE);
-	File.save(Filename, AudioFileFormat::Wave);		
+  // Load model
+  session = std::make_shared<Ort::Session>(env, (const wchar_t*)ModelPath, session_options);
+  for (int i = 0; i < BLOCK_LEN; i++) {
+    m_windows[i] = sinf(PI * i / (BLOCK_LEN - 1));
+  }
+  ResetInout();
 }
 
-void GTCRNImpl::Enhance(std::string in_audio,std::string out_audio){
-	std::vector<float>  testdata; //vector used to store enhanced data in a wav file
-    AudioFile<float> inputfile;
-	inputfile.load(in_audio);
-	int audiolen=inputfile.getNumSamplesPerChannel();
-    int process_num=audiolen/BLOCK_SHIFT;
+void GTCRNImpl::ResetInout() {
+    memset(mic_buffer_, 0, sizeof(mic_buffer_));
+    memset(out_buffer_, 0, sizeof(out_buffer_));
+    memset(conv_cache_, 0, sizeof(conv_cache_));
+    memset(tra_cache_, 0, sizeof(tra_cache_));
+    memset(inter_cache_, 0, sizeof(inter_cache_));
+}
 
+int GTCRNImpl::Enhance(float* in, float* out, int len) {
+	std::vector<float>  testdata; //vector used to store enhanced data in a wav file
+    int process_num=len/BLOCK_SHIFT;
 	for(int i=0;i<process_num;i++){
-        memmove(m_pEngine.mic_buffer, m_pEngine.mic_buffer + BLOCK_SHIFT, (BLOCK_LEN - BLOCK_SHIFT) * sizeof(float));
+        memmove(mic_buffer_, mic_buffer_ + BLOCK_SHIFT, (BLOCK_LEN - BLOCK_SHIFT) * sizeof(float));
       
-        for(int n=0;n<BLOCK_SHIFT;n++){
-            m_pEngine.mic_buffer[n+BLOCK_LEN-BLOCK_SHIFT]=inputfile.samples[0][n+i*BLOCK_SHIFT];} 
+        for(int n=0;n<BLOCK_SHIFT;n++)
+            mic_buffer_[n+BLOCK_LEN-BLOCK_SHIFT]=in[n+i*BLOCK_SHIFT];
+
         OnnxInfer();
-        for(int j=0;j<BLOCK_SHIFT;j++){
-            testdata.push_back(m_pEngine.out_buffer[j]);    //for one forward process save first BLOCK_SHIFT model output samples
-        }
+        for(int j=0;j<BLOCK_SHIFT;j++)
+            testdata.push_back(out_buffer_[j]);    //for one forward process save first BLOCK_SHIFT model output samples
     }
-    ExportWAV(out_audio,testdata,SAMEPLERATE);
+    return len;
 }
 
 
@@ -48,6 +54,7 @@ void GTCRNImpl::OnnxInfer() {
     float estimated_block[BLOCK_LEN];
     
     double mic_in[BLOCK_LEN];
+    double fft_in[BLOCK_LEN];
     std::vector<cpx_type> mic_res(BLOCK_LEN);
 
 	std::vector<size_t> shape;
@@ -57,33 +64,27 @@ void GTCRNImpl::OnnxInfer() {
     std::vector<ptrdiff_t> stridel, strideo;
     strideo.push_back(sizeof(cpx_type));
     stridel.push_back(sizeof(double));
- 
+
 	for (int i = 0; i < BLOCK_LEN; i++){
-        fft_in[i] = m_pEngine.in_buffer[i]*m_windows[i];
+        fft_in[i] = mic_buffer_[i] * m_windows[i];
 	}
 
-	pocketfft::r2c(shape, stridel, strideo, axes, pocketfft::FORWARD, fft_in, fft_res.data(), 1.0);
+	pocketfft::r2c(shape, stridel, strideo, axes, pocketfft::FORWARD, fft_in, mic_res.data(), 1.0);
 
 	for (int i=0;i<FFT_OUT_SIZE;i++){
         mic_fea[2*i]=mic_res[i].real();
         mic_fea[2*i+1]=mic_res[i].imag();
     }
 
-    Ort::Value input_feature = Ort::Value::CreateTensor<float>(
-		memory_info, mic_fea, FFT_OUT_SIZE*2, infea_node_dims, 4);
-	Ort::Value conv_cache = Ort::Value::CreateTensor<float>(
-		memory_info,  m_pEngine.conv_cache,2*16*16*33, conv_cache_dims, 5);
-
-	Ort::Value tra_cache = Ort::Value::CreateTensor<float>(
-		memory_info, m_pEngine.tra_cache,2*3*16, tra_cache_dims, 5);
-	Ort::Value inter_cache = Ort::Value::CreateTensor<float>(
-		memory_info, m_pEngine.inter_cache,2*33*16, inter_cache_dims, 4);
-
 	ort_inputs.clear();
-	ort_inputs.emplace_back(std::move(input_feature));
-	ort_inputs.emplace_back(std::move(conv_cache));
-	ort_inputs.emplace_back(std::move(tra_cache));
-	ort_inputs.emplace_back(std::move(inter_cache));
+	ort_inputs.emplace_back(Ort::Value::CreateTensor<float>(
+        memory_info, mic_fea, FFT_OUT_SIZE * 2, infea_node_dims, 4));
+	ort_inputs.emplace_back(Ort::Value::CreateTensor<float>(
+        memory_info, conv_cache_, 2 * 16 * 16 * 33, conv_cache_dims, 5));
+	ort_inputs.emplace_back(Ort::Value::CreateTensor<float>(
+        memory_info, tra_cache_, 2 * 3 * 16, tra_cache_dims, 5));
+	ort_inputs.emplace_back(Ort::Value::CreateTensor<float>(
+        memory_info, inter_cache_, 2 * 33 * 16, inter_cache_dims, 4));
 	
     ort_outputs = session->Run(Ort::RunOptions{nullptr},
 		input_node_names.data(), ort_inputs.data(), ort_inputs.size(),
@@ -91,28 +92,26 @@ void GTCRNImpl::OnnxInfer() {
     
 	float *out_fea = ort_outputs[0].GetTensorMutableData<float>();
 	float *out_concache = ort_outputs[1].GetTensorMutableData<float>();
-	std::memcpy(m_pEngine.conv_cache, out_concache, 2*16*16*33 * sizeof(float));
+	std::memcpy(conv_cache_, out_concache, 2*16*16*33 * sizeof(float));
 	float *out_tracache = ort_outputs[2].GetTensorMutableData<float>();
-	std::memcpy(m_pEngine.tra_cache, out_tracache, 2*3*16 * sizeof(float));
+	std::memcpy(tra_cache_, out_tracache, 2*3*16 * sizeof(float));
 
 	float *out_intercache = ort_outputs[3].GetTensorMutableData<float>();
-	std::memcpy(m_pEngine.inter_cache, out_intercache, 2*33*16 * sizeof(float));
+	std::memcpy(inter_cache_, out_intercache, 2*33*16 * sizeof(float));
 
 
 	for (int i = 0; i < FFT_OUT_SIZE; i++) {
-        mic_res[i] = cpx_type(output_fea[2*i] , output_fea[2*i+1]);
+        mic_res[i] = cpx_type(out_fea[2*i] , out_fea[2*i+1]);
 	}
     pocketfft::c2r(shape, strideo, stridel, axes, pocketfft::BACKWARD, mic_res.data(), mic_in, 1.0);   
     
     for (int i = 0; i < BLOCK_LEN; i++)
         estimated_block[i] = mic_in[i] / BLOCK_LEN;   
 
-	memmove(m_pEngine.out_buffer, m_pEngine.out_buffer + BLOCK_SHIFT, 
-        (BLOCK_LEN - BLOCK_SHIFT) * sizeof(float));
-    memset(m_pEngine.out_buffer + (BLOCK_LEN - BLOCK_SHIFT), 
-        0, BLOCK_SHIFT * sizeof(float));
+	memmove(out_buffer_, out_buffer_ + BLOCK_SHIFT, (BLOCK_LEN - BLOCK_SHIFT) * sizeof(float));
+    memset(out_buffer_ + (BLOCK_LEN - BLOCK_SHIFT), 0, BLOCK_SHIFT * sizeof(float));
     for (int i = 0; i < BLOCK_LEN; i++){
-        m_pEngine.out_buffer[i] += estimated_block[i]*m_windows[i];
+        out_buffer_[i] += estimated_block[i]*m_windows[i];
     }
    
 }
