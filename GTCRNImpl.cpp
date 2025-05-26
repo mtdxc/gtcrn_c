@@ -5,6 +5,7 @@
 #ifndef PI
 #define PI 3.14159265358979323846f
 #endif
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 GTCRNImpl::GTCRNImpl(const char *ModelPath)
 {
@@ -15,7 +16,15 @@ GTCRNImpl::GTCRNImpl(const char *ModelPath)
   session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
   // Load model
-  session = std::make_shared<Ort::Session>(env, (const wchar_t *)ModelPath, session_options);
+  std::vector<uint8_t> model;
+  if (FILE* fp = fopen(ModelPath, "rb")) {
+      fseek(fp, 0, SEEK_END);
+      model.resize(ftell(fp));
+      fseek(fp, 0, SEEK_SET);
+      fread(model.data(), model.size(), 1, fp);
+      fclose(fp);
+      session = std::make_shared<Ort::Session>(env, model.data(), model.size(), session_options);
+  }
   for (int i = 0; i < BLOCK_LEN; i++) {
     m_windows[i] = sinf(PI * i / (BLOCK_LEN - 1));
   }
@@ -31,22 +40,19 @@ void GTCRNImpl::ResetInout()
   memset(inter_cache_, 0, sizeof(inter_cache_));
 }
 
-int GTCRNImpl::Enhance(float *in, float *out, int len)
+int GTCRNImpl::Process(float *in, float *out, int len)
 {
-  std::vector<float> testdata; // vector used to store enhanced data in a wav file
-  int process_num = len / BLOCK_SHIFT;
-  for (int i = 0; i < process_num; i++)
-  {
-    memmove(mic_buffer_, mic_buffer_ + BLOCK_SHIFT, (BLOCK_LEN - BLOCK_SHIFT) * sizeof(float));
-
-    for (int n = 0; n < BLOCK_SHIFT; n++)
-      mic_buffer_[n + BLOCK_LEN - BLOCK_SHIFT] = in[n + i * BLOCK_SHIFT];
-
-    OnnxInfer();
-    for (int j = 0; j < BLOCK_SHIFT; j++)
-      testdata.push_back(out_buffer_[j]); // for one forward process save first BLOCK_SHIFT model output samples
+  if (len != BLOCK_SHIFT) {
+    return -1;
   }
-  return len;
+  memmove(mic_buffer_, mic_buffer_ + BLOCK_SHIFT, (BLOCK_LEN - BLOCK_SHIFT) * sizeof(float));
+  for (int n = 0; n < BLOCK_SHIFT; n++)
+    mic_buffer_[n + BLOCK_LEN - BLOCK_SHIFT] = in[n];
+
+  OnnxInfer();
+  for (int j = 0; j < BLOCK_SHIFT; j++)
+    out[j] = out_buffer_[j]; // for one forward process save first BLOCK_SHIFT model output samples
+  return BLOCK_SHIFT;
 }
 
 void GTCRNImpl::OnnxInfer()
@@ -98,8 +104,7 @@ void GTCRNImpl::OnnxInfer()
   std::memcpy(inter_cache_, out_intercache, 2 * 33 * 16 * sizeof(float));
 
   float *out_fea = ort_outputs[0].GetTensorMutableData<float>();
-  for (int i = 0; i < FFT_OUT_SIZE; i++)
-  {
+  for (int i = 0; i < FFT_OUT_SIZE; i++) {
     mic_res[i] = cpx_type(out_fea[2 * i], out_fea[2 * i + 1]);
   }
   double mic_in[BLOCK_LEN];

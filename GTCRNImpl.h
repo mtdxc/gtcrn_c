@@ -13,8 +13,8 @@ class GTCRNImpl {
 public:
   GTCRNImpl(const char* ModelPath);
 
-  int Enhance(float* in, float* out, int len);
-
+  int Process(float* in, float* out, int len);
+  int SampleSize() const { return BLOCK_SHIFT; }
   void OnnxInfer();
 private:
   // OnnxRuntime resources

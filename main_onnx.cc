@@ -74,6 +74,7 @@ float fft_in[FFT_LEN] = {0};
 float fft_out[FFT_LEN] = {0};
 int16_t read_in[FRAME_LEN] = {0};
 int16_t write_out[FFT_LEN] = {0};
+
 const OrtApi* g_ort = OrtGetApiBase()->GetApi(ORT_API_VERSION);
 void CheckStatus(OrtStatus* status)
 {
@@ -84,6 +85,7 @@ void CheckStatus(OrtStatus* status)
         exit(1);
     }
 }
+
 int main()
 {
     FILE *fp_in, *fp_out;
