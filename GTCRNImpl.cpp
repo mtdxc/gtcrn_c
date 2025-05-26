@@ -28,10 +28,10 @@ GTCRNImpl::GTCRNImpl(const char *ModelPath)
   for (int i = 0; i < BLOCK_LEN; i++) {
     m_windows[i] = sinf(PI * i / (BLOCK_LEN - 1));
   }
-  ResetInout();
+  resetInout();
 }
 
-void GTCRNImpl::ResetInout()
+void GTCRNImpl::resetInout()
 {
   memset(mic_buffer_, 0, sizeof(mic_buffer_));
   memset(out_buffer_, 0, sizeof(out_buffer_));
@@ -40,37 +40,48 @@ void GTCRNImpl::ResetInout()
   memset(inter_cache_, 0, sizeof(inter_cache_));
 }
 
-int GTCRNImpl::Process(float *in, float *out, int len)
-{
-  if (len != BLOCK_SHIFT) {
-    return -1;
-  }
-  memmove(mic_buffer_, mic_buffer_ + BLOCK_SHIFT, (BLOCK_LEN - BLOCK_SHIFT) * sizeof(float));
-  for (int n = 0; n < BLOCK_SHIFT; n++)
-    mic_buffer_[n + BLOCK_LEN - BLOCK_SHIFT] = in[n];
-
-  OnnxInfer();
-  for (int j = 0; j < BLOCK_SHIFT; j++)
-    out[j] = out_buffer_[j]; // for one forward process save first BLOCK_SHIFT model output samples
-  return BLOCK_SHIFT;
+int GTCRNImpl::Process(float* in, float* out, int len) {
+    if (len != FRAME_LEN) {
+        return -1;
+    }
+    memmove(mic_buffer_, mic_buffer_ + FRAME_LEN, FRAME_LEN * sizeof(float));
+    memcpy(mic_buffer_ + FRAME_LEN, in, sizeof(float) * FRAME_LEN);
+    onnxInfer();
+    memcpy(out, out_buffer_, sizeof(float) * FRAME_LEN);
+    return FRAME_LEN;
 }
 
-void GTCRNImpl::OnnxInfer()
+int GTCRNImpl::Process(short *in, short*out, int len)
 {
-  typedef std::complex<double> cpx_type;
+  if (len != FRAME_LEN) {
+    return -1;
+  }
+  memmove(mic_buffer_, mic_buffer_ + FRAME_LEN, FRAME_LEN * sizeof(float));
+  for (int n = 0; n < FRAME_LEN; n++)
+    mic_buffer_[n + FRAME_LEN] = in[n] / 32767.0;
+
+  onnxInfer();
+  for (int j = 0; j < FRAME_LEN; j++)
+    out[j] = out_buffer_[j] * 32768; // for one forward process save first FRAME_LEN model output samples
+  return FRAME_LEN;
+}
+
+void GTCRNImpl::onnxInfer()
+{
+  typedef std::complex<float> cpx_type;
   std::vector<cpx_type> mic_res(BLOCK_LEN);
 
-  static const std::vector<size_t> shape = {BLOCK_LEN};
-  static const std::vector<size_t> axes = {0};
-  static const std::vector<ptrdiff_t> stridel = {sizeof(cpx_type)};
-  static const std::vector<ptrdiff_t> strideo = {sizeof(double)};
+  std::vector<size_t> shape = { BLOCK_LEN };
+  std::vector<size_t> axes = {0};
+  std::vector<ptrdiff_t> stridel = { sizeof(float) };
+  std::vector<ptrdiff_t> strideo = {sizeof(cpx_type)};
 
-  double fft_in[BLOCK_LEN];
+  float fft_in[BLOCK_LEN];
   for (int i = 0; i < BLOCK_LEN; i++) {
     fft_in[i] = mic_buffer_[i] * m_windows[i];
   }
 
-  pocketfft::r2c(shape, stridel, strideo, axes, pocketfft::FORWARD, fft_in, mic_res.data(), 1.0);
+  pocketfft::r2c(shape, stridel, strideo, axes, pocketfft::FORWARD, fft_in, mic_res.data(), 1.0f);
 
   float mic_fea[FFT_OUT_SIZE * 2] = {0};
   for (int i = 0; i < FFT_OUT_SIZE; i++)
@@ -79,7 +90,7 @@ void GTCRNImpl::OnnxInfer()
     mic_fea[2 * i + 1] = mic_res[i].imag();
   }
 
-  Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeCPU);
+  Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
   std::vector<Ort::Value> ort_inputs;
   ort_inputs.emplace_back(Ort::Value::CreateTensor<float>(
       memory_info, mic_fea, FFT_OUT_SIZE * 2, infea_node_dims, 4));
@@ -107,16 +118,16 @@ void GTCRNImpl::OnnxInfer()
   for (int i = 0; i < FFT_OUT_SIZE; i++) {
     mic_res[i] = cpx_type(out_fea[2 * i], out_fea[2 * i + 1]);
   }
-  double mic_in[BLOCK_LEN];
-  pocketfft::c2r(shape, strideo, stridel, axes, pocketfft::BACKWARD, mic_res.data(), mic_in, 1.0);
+  float mic_in[BLOCK_LEN];
+  pocketfft::c2r(shape, strideo, stridel, axes, pocketfft::BACKWARD, mic_res.data(), mic_in, 1.0f);
 
   float estimated_block[BLOCK_LEN];
   for (int i = 0; i < BLOCK_LEN; i++)
-    estimated_block[i] = mic_in[i] / BLOCK_LEN;
+    estimated_block[i] = mic_in[i] / BLOCK_LEN * m_windows[i];
 
-  memmove(out_buffer_, out_buffer_ + BLOCK_SHIFT, (BLOCK_LEN - BLOCK_SHIFT) * sizeof(float));
-  memset(out_buffer_ + (BLOCK_LEN - BLOCK_SHIFT), 0, BLOCK_SHIFT * sizeof(float));
+  memmove(out_buffer_, out_buffer_ + FRAME_LEN, FRAME_LEN * sizeof(float));
+  memset(out_buffer_ + FRAME_LEN, 0, FRAME_LEN * sizeof(float));
   for (int i = 0; i < BLOCK_LEN; i++) {
-    out_buffer_[i] += estimated_block[i] * m_windows[i];
+    out_buffer_[i] += estimated_block[i];
   }
 }

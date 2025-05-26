@@ -6,17 +6,20 @@
 
 #define SAMEPLERATE (16000)
 #define BLOCK_LEN (512)
-#define BLOCK_SHIFT (256)
+#define FRAME_LEN (256)
 #define FFT_OUT_SIZE (257)
 
 class GTCRNImpl {
 public:
   GTCRNImpl(const char* ModelPath);
 
+  int Process(short* in, short* out, int len);
   int Process(float* in, float* out, int len);
-  int SampleSize() const { return BLOCK_SHIFT; }
-  void OnnxInfer();
+  int SampleSize() const { return FRAME_LEN; }
 private:
+  void onnxInfer();
+  void resetInout();
+
   // OnnxRuntime resources
   Ort::Env env;
   std::shared_ptr<Ort::Session> session = nullptr;
@@ -34,8 +37,6 @@ private:
   float conv_cache_[2 * 16 * 16 * 33] = { 0 };
   float tra_cache_[2 * 3 * 16] = { 0 };
   float inter_cache_[2 * 33 * 16] = { 0 };
-  
-  void ResetInout();
 
   float m_windows[BLOCK_LEN] = {0};
 };
