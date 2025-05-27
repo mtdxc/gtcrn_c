@@ -10,7 +10,7 @@ int main(int argc, char* argv[]) {
     }
     unsigned int channels, sampleRate;
     drwav_uint64 samples;
-    float* pcm = drwav_open_file_and_read_pcm_frames_f32(argv[1], &channels, &sampleRate, &samples, nullptr);
+    short* pcm = drwav_open_file_and_read_pcm_frames_s16(argv[1], &channels, &sampleRate, &samples, nullptr);
     if (!pcm) {
         std::cerr << "Error: Could not read audio file." << std::endl;
         return 1;
@@ -22,15 +22,15 @@ int main(int argc, char* argv[]) {
     drwav out;
     drwav_data_format fmt;
     fmt.container = drwav_container_riff;
-    fmt.format = DR_WAVE_FORMAT_IEEE_FLOAT;
-    fmt.bitsPerSample = 32; // Output will be in 32-bit float
+    fmt.format = DR_WAVE_FORMAT_PCM;
+    fmt.bitsPerSample = 16;
     fmt.channels = channels;
     fmt.sampleRate = sampleRate;
     drwav_init_file_write(&out, argv[2], &fmt, nullptr);
 
     GTCRNImpl gtcrn("gtcrn_simple.onnx");
     // Example usage of Enhance method
-    float output_data[FRAME_LEN]; // Buffer for output data
+    short output_data[FRAME_LEN]; // Buffer for output data
     for (size_t i = 0; i < samples; i+= FRAME_LEN)
     {
         if (samples - i < FRAME_LEN) {
